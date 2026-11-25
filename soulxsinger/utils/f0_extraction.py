@@ -66,7 +66,6 @@ class ConvBlockRes(nn.Module):
 class ResEncoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, n_blocks=1, momentum=0.01):
         super(ResEncoderBlock, self).__init__()
-        self.n_blocks = n_blocks
         self.conv = nn.ModuleList()
         self.conv.append(ConvBlockRes(in_channels, out_channels, momentum))
         for i in range(n_blocks - 1):
@@ -85,21 +84,16 @@ class ResEncoderBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, in_size, n_encoders, kernel_size, n_blocks, out_channels=16, momentum=0.01):
+    def __init__(self, in_channels, n_encoders, kernel_size, n_blocks, out_channels=16, momentum=0.01):
         super(Encoder, self).__init__()
-        self.n_encoders = n_encoders
         self.bn = nn.BatchNorm2d(in_channels, momentum=momentum)
         self.layers = nn.ModuleList()
-        self.latent_channels = []
-        for i in range(self.n_encoders):
+        for _ in range(n_encoders):
             self.layers.append(
                 ResEncoderBlock(in_channels, out_channels, kernel_size, n_blocks, momentum=momentum)
             )
-            self.latent_channels.append([out_channels, in_size])
             in_channels = out_channels
             out_channels *= 2
-            in_size //= 2
-        self.out_size = in_size
         self.out_channel = out_channels
 
     def forward(self, x):
@@ -114,10 +108,9 @@ class Encoder(nn.Module):
 class Intermediate(nn.Module):
     def __init__(self, in_channels, out_channels, n_inters, n_blocks, momentum=0.01):
         super(Intermediate, self).__init__()
-        self.n_inters = n_inters
         self.layers = nn.ModuleList()
         self.layers.append(ResEncoderBlock(in_channels, out_channels, None, n_blocks, momentum))
-        for i in range(self.n_inters - 1):
+        for _ in range(n_inters - 1):
             self.layers.append(ResEncoderBlock(out_channels, out_channels, None, n_blocks, momentum))
 
     def forward(self, x):
@@ -130,7 +123,6 @@ class ResDecoderBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride, n_blocks=1, momentum=0.01):
         super(ResDecoderBlock, self).__init__()
         out_padding = (0, 1) if stride == (1, 2) else (1, 1)
-        self.n_blocks = n_blocks
         self.conv1 = nn.Sequential(
             nn.ConvTranspose2d(
                 in_channels=in_channels,
@@ -161,8 +153,7 @@ class Decoder(nn.Module):
     def __init__(self, in_channels, n_decoders, stride, n_blocks, momentum=0.01):
         super(Decoder, self).__init__()
         self.layers = nn.ModuleList()
-        self.n_decoders = n_decoders
-        for i in range(self.n_decoders):
+        for _ in range(n_decoders):
             out_channels = in_channels // 2
             self.layers.append(
                 ResDecoderBlock(in_channels, out_channels, stride, n_blocks, momentum)
@@ -178,7 +169,7 @@ class Decoder(nn.Module):
 class DeepUnet(nn.Module):
     def __init__(self, kernel_size, n_blocks, en_de_layers=5, inter_layers=4, in_channels=1, en_out_channels=16):
         super(DeepUnet, self).__init__()
-        self.encoder = Encoder(in_channels, 128, en_de_layers, kernel_size, n_blocks, en_out_channels)
+        self.encoder = Encoder(in_channels, en_de_layers, kernel_size, n_blocks, en_out_channels)
         self.intermediate = Intermediate(
             self.encoder.out_channel // 2,
             self.encoder.out_channel,
@@ -213,9 +204,8 @@ class E2E(nn.Module):
         return x
 
 
-
 class MelSpectrogram(torch.nn.Module):
-    def __init__(self, is_half, n_mel_channels, sampling_rate, win_length, hop_length, 
+    def __init__(self, n_mel_channels, sampling_rate, win_length, hop_length,
                  n_fft=None, mel_fmin=0, mel_fmax=None, clamp=1e-5):
         super().__init__()
         n_fft = win_length if n_fft is None else n_fft
@@ -233,16 +223,13 @@ class MelSpectrogram(torch.nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
-        self.sampling_rate = sampling_rate
-        self.n_mel_channels = n_mel_channels
         self.clamp = clamp
-        self.is_half = is_half
 
     def forward(self, audio, center=True):
         device_key = str(audio.device)
         if device_key not in self.hann_window:
             self.hann_window[device_key] = torch.hann_window(self.win_length).to(audio.device)
-        
+
         fft = torch.stft(
             audio,
             n_fft=self.n_fft,
@@ -253,24 +240,17 @@ class MelSpectrogram(torch.nn.Module):
             return_complex=True,
         )
         magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
-        
+
         mel_output = torch.matmul(self.mel_basis, magnitude)
-        if self.is_half:
-            mel_output = mel_output.half()
         log_mel_spec = torch.log(torch.clamp(mel_output, min=self.clamp))
         return log_mel_spec
 
 
-
 class RMVPE:
-    def __init__(self, model_path: str, is_half, device=None):
-        self.is_half = is_half
-        if device is None:
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    def __init__(self, model_path: str, device):
         self.device = torch.device(device) if isinstance(device, str) else device
-        
+
         self.mel_extractor = MelSpectrogram(
-            is_half=is_half,
             n_mel_channels=128,
             sampling_rate=16000,
             win_length=1024,
@@ -279,21 +259,17 @@ class RMVPE:
             mel_fmin=30,
             mel_fmax=8000
         ).to(self.device)
-        
+
         model = E2E(n_blocks=4, n_gru=1, kernel_size=(2, 2))
-        # Preserve the original trusted-checkpoint loading semantics on Torch 2.2.
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt, strict=True)
         del ckpt
         model.eval()
-        
-        if is_half:
-            model = model.half()
-        else:
-            model = model.float()
-        
+
+        model = model.float()
+
         self.model = model.to(self.device)
-        
+
         cents_mapping = 20 * np.arange(360) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))  # 368
 
@@ -303,7 +279,7 @@ class RMVPE:
             n_pad = 32 * ((n_frames - 1) // 32 + 1) - n_frames
             if n_pad > 0:
                 mel = F.pad(mel, (0, n_pad), mode="constant")
-            mel = mel.half() if self.is_half else mel.float()
+            mel = mel.float()
             hidden = self.model(mel)
             return hidden[:, :n_frames]
 
@@ -316,14 +292,11 @@ class RMVPE:
     def infer_from_audio(self, audio, thred=0.03):
         if not torch.is_tensor(audio):
             audio = torch.from_numpy(audio)
-        
+
         mel = self.mel_extractor(audio.float().to(self.device).unsqueeze(0), center=True)
         hidden = self.mel2hidden(mel)
         hidden = hidden.squeeze(0).cpu().numpy()
-        
-        if self.is_half:
-            hidden = hidden.astype("float32")
-        
+
         f0 = self.decode(hidden, thred=thred)
         return f0
 
@@ -331,25 +304,25 @@ class RMVPE:
         center = np.argmax(salience, axis=1)
         salience = np.pad(salience, ((0, 0), (4, 4)))
         center += 4
-        
+
         todo_salience = []
         todo_cents_mapping = []
         starts = center - 4
         ends = center + 5
-        
+
         for idx in range(salience.shape[0]):
             todo_salience.append(salience[:, starts[idx]:ends[idx]][idx])
             todo_cents_mapping.append(self.cents_mapping[starts[idx]:ends[idx]])
-        
+
         todo_salience = np.array(todo_salience)
         todo_cents_mapping = np.array(todo_cents_mapping)
         product_sum = np.sum(todo_salience * todo_cents_mapping, 1)
         weight_sum = np.sum(todo_salience, 1)
         devided = product_sum / weight_sum
-        
+
         maxx = np.max(salience, axis=1)
         devided[maxx <= thred] = 0
-        
+
         return devided
 
 class F0Extractor:
@@ -364,7 +337,6 @@ class F0Extractor:
         model_path: str,
         device: str = "cpu",
         *,
-        is_half: bool = False,
         input_sr: int = 16000,
         target_sr: int = 24000,
         hop_size: int = 480,
@@ -377,7 +349,6 @@ class F0Extractor:
         Args:
             model_path: Path to RMVPE checkpoint.
             device: Torch device string, e.g. ``"cuda:0"`` / ``"cpu"``.
-            is_half: Whether to run the model in fp16.
             input_sr: Input resample rate used by RMVPE frontend.
             target_sr: Target sample rate for the output f0 grid.
             hop_size: Target hop size for the output f0 grid.
@@ -385,7 +356,6 @@ class F0Extractor:
             thred: Voicing threshold used when decoding salience.
             verbose: Whether to print verbose logs.
         """
-        self.model_path = model_path
         self.input_sr = input_sr
         self.target_sr = target_sr
         self.hop_size = hop_size
@@ -394,14 +364,13 @@ class F0Extractor:
 
         self.verbose = verbose
 
-        self.model = RMVPE(model_path, is_half=is_half, device=device)
+        self.model = RMVPE(model_path, device=device)
 
         if self.verbose:
             print(
                 "[f0 extraction] init success:",
                 f"device={device}",
                 f"model_path={model_path}",
-                f"is_half={is_half}",
                 f"input_sr={input_sr}",
                 f"target_sr={target_sr}",
                 f"hop_size={hop_size}",

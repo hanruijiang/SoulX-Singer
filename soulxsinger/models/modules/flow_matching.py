@@ -18,51 +18,12 @@ class FlowMatchingTransformer(nn.Module):
         self.mel_dim = config.mel_dim
         self.hidden_size = config.hidden_size
         self.cond_emb = nn.Linear(config.cond_codebook_size, self.hidden_size)
-        self.reset_parameters()
         self.diff_estimator = DiffLlama(
             mel_dim=self.mel_dim,
             hidden_size=self.hidden_size,
             num_heads=config.num_heads,
             num_layers=config.num_layers,
         )
-
-    def reset_parameters(self):
-        def _reset_parameters(m):
-            if isinstance(m, nn.MultiheadAttention):
-                if m._qkv_same_embed_dim:
-                    nn.init.normal_(m.in_proj_weight, std=0.02)
-                else:
-                    nn.init.normal_(m.q_proj_weight, std=0.02)
-                    nn.init.normal_(m.k_proj_weight, std=0.02)
-                    nn.init.normal_(m.v_proj_weight, std=0.02)
-
-                if m.in_proj_bias is not None:
-                    nn.init.constant_(m.in_proj_bias, 0.0)
-                    nn.init.constant_(m.out_proj.bias, 0.0)
-                if m.bias_k is not None:
-                    nn.init.xavier_normal_(m.bias_k)
-                if m.bias_v is not None:
-                    nn.init.xavier_normal_(m.bias_v)
-
-            elif (
-                isinstance(m, nn.Conv1d)
-                or isinstance(m, nn.ConvTranspose1d)
-                or isinstance(m, nn.Conv2d)
-                or isinstance(m, nn.ConvTranspose2d)
-            ):
-                m.weight.data.normal_(0.0, 0.02)
-
-            elif isinstance(m, nn.Linear):
-                m.weight.data.normal_(mean=0.0, std=0.02)
-                if m.bias is not None:
-                    m.bias.data.zero_()
-
-            elif isinstance(m, nn.Embedding):
-                m.weight.data.normal_(mean=0.0, std=0.02)
-                if m.padding_idx is not None:
-                    m.weight.data[m.padding_idx].zero_()
-
-        self.apply(_reset_parameters)
 
     @torch.no_grad()
     def reverse_diffusion(

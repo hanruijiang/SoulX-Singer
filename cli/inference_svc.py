@@ -38,7 +38,7 @@ def build_model(model_path, config, device="cuda", use_fp16=False):
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     del checkpoint
     if use_fp16 and torch.device(device).type == "cuda":
-        # Keep mel analysis and the ISTFT window in their original float32 precision.
+        # Use float32 for mel analysis and ISTFT.
         model.f0_encoder.half()
         model.cfm_decoder.half()
         model.vocoder.model.backbone.half()
@@ -121,7 +121,6 @@ def process(args, config, model=None):
     output = save_dir / "generated.wav"
     sf.write(output, audio.squeeze().float().cpu().numpy(), sample_rate)
     print(f"Generated audio: {output} (pitch shift: {shift} semitones)")
-
 
 
 def build_parser():

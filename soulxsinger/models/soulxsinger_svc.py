@@ -25,7 +25,7 @@ class SoulXSingerSVC(nn.Module):
         self.audio_cfg = config.audio
         enc_cfg = config.model.encoder
         cfm_cfg = config.model.flow_matching
-        
+
         self.whisper_encoder = WhisperEncoder()
         self.f0_encoder = nn.Embedding(enc_cfg["f0_bin"], enc_cfg["f0_dim"])
         self.cfm_decoder = CFMDecoder(cfm_cfg)
@@ -38,46 +38,26 @@ class SoulXSingerSVC(nn.Module):
         """
         Convert continuous F0 values to discrete F0 bins (SIL and C1 - B6, 361 bins).
         args:
-            f0: continuous F0 values
+            f0: continuous F0 tensor
             f0_bin: number of F0 bins
             f0_min: minimum F0 value
             f0_shift: shift value for F0 bins
         returns:
             f0_coarse: discrete F0 bins
         """
-        is_torch = isinstance(f0, torch.Tensor)
-        uv_mask = f0 <= 0    
-
-        if is_torch:  
-            f0_safe = torch.maximum(f0, f0.new_tensor(f0_min))
-            f0_cents = 1200 * torch.log2(f0_safe / f0_min)
-        else:
-            f0_safe = np.maximum(f0, f0_min)
-            f0_cents = 1200 * np.log2(f0_safe / f0_min)
-
-        f0_coarse = (f0_cents / 20) + 1
-        
-        if is_torch:
-            f0_coarse = torch.round(f0_coarse).long()
-            f0_coarse = torch.clamp(f0_coarse, min=1, max=f0_bin - 1)
-        else:
-            f0_coarse = np.rint(f0_coarse).astype(int)
-            f0_coarse = np.clip(f0_coarse, 1, f0_bin - 1)
-
+        uv_mask = f0 <= 0
+        f0_safe = torch.maximum(f0, f0.new_tensor(f0_min))
+        f0_cents = 1200 * torch.log2(f0_safe / f0_min)
+        f0_coarse = torch.round(f0_cents / 20 + 1).long()
+        f0_coarse = torch.clamp(f0_coarse, 1, f0_bin - 1)
         f0_coarse[uv_mask] = 0
 
         if f0_shift != 0:
-            if is_torch:
-                voiced = f0_coarse > 0
-                if voiced.any():
-                    shifted = f0_coarse[voiced] + f0_shift
-                    f0_coarse[voiced] = torch.clamp(shifted, 1, f0_bin - 1)
-            else:
-                voiced = f0_coarse > 0
-                if np.any(voiced):
-                    shifted = f0_coarse[voiced] + f0_shift
-                    f0_coarse[voiced] = np.clip(shifted, 1, f0_bin - 1)
-        
+            voiced = f0_coarse > 0
+            f0_coarse[voiced] = torch.clamp(
+                f0_coarse[voiced] + f0_shift, 1, f0_bin - 1
+            )
+
         return f0_coarse
 
     @staticmethod
@@ -162,7 +142,7 @@ class SoulXSingerSVC(nn.Module):
             overlap_segments.append((overlap_start / f0_rate, overlap_end / f0_rate))
 
         segment_start, segment_end = 0, 1
-        
+
         while segment_start < len(split_points) - 1:
             while (
                 segment_end < len(split_points) - 1
@@ -179,9 +159,9 @@ class SoulXSingerSVC(nn.Module):
             segment_end = segment_start + 1
 
         return overlap_segments, segments
-    
+
     def infer(
-        self, 
+        self,
         pt_wav: torch.Tensor,
         gt_wav: torch.Tensor,
         pt_f0: torch.Tensor,
@@ -208,13 +188,11 @@ class SoulXSingerSVC(nn.Module):
 
         # calculate auto pitch shift
         if auto_shift and pitch_shift == 0:
-            if gt_f0 is not None and pt_f0 is not None:
-                gt_f0_median = torch.median(gt_f0[gt_f0 > 0])
-                pt_f0_median = torch.median(pt_f0[pt_f0 > 0])
-                pitch_shift = torch.round(torch.log2(pt_f0_median / gt_f0_median) * 1200 / 100).int().item()
-            else:
-                print("Warning: pitch_shift is True but note_pitch or f0 is None. Set f0_shift to 0.")
-                pitch_shift = 0
+            gt_f0_median = torch.median(gt_f0[gt_f0 > 0])
+            pt_f0_median = torch.median(pt_f0[pt_f0 > 0])
+            pitch_shift = torch.round(
+                torch.log2(pt_f0_median / gt_f0_median) * 1200 / 100
+            ).int().item()
         use_fp16 = use_fp16 and pt_wav.is_cuda
         # Keep audio, F0 and mel analysis in float32; only neural features use fp16.
         pt_mel = self.mel(pt_wav.float() if pt_wav.dtype != torch.float32 else pt_wav)
@@ -223,7 +201,7 @@ class SoulXSingerSVC(nn.Module):
         with _autocast_if(use_fp16):
             pt_content_feat = self.whisper_encoder.encode(pt_wav, sr=self.audio_cfg.sample_rate)
 
-        # if target audio is less than 30 seconds, infer the whole audio
+        # Infer short targets in one pass.
         if gt_wav.shape[-1] < 30 * self.audio_cfg.sample_rate:
             with _autocast_if(use_fp16):
                 generated_audio = self.infer_segment(
@@ -238,9 +216,9 @@ class SoulXSingerSVC(nn.Module):
                 )
             return generated_audio, pitch_shift
 
-        # if target audio is longer than 30 seconds, build vocal segments and infer each segment
+        # Split long targets into Whisper-sized segments.
         f0_rate = self.audio_cfg.sample_rate // self.audio_cfg.hop_size
-        
+
         overlap_segments, segments = self.build_vocal_segments(
             gt_f0,
             f0_rate=f0_rate,
@@ -282,7 +260,7 @@ class SoulXSingerSVC(nn.Module):
             segment_generated_audio = segment_generated_audio[segment_start - wav_start: segment_end - wav_start]
 
             generated_audio[:, segment_start:segment_end] = segment_generated_audio
-    
+
         return generated_audio, pitch_shift
 
     def infer_segment(self, pt_mel, pt_content_feat, gt_wav, pt_f0, gt_f0, pitch_shift=0, n_steps=32, cfg=3):
@@ -302,7 +280,7 @@ class SoulXSingerSVC(nn.Module):
 
         f0_feat = self.f0_encoder(f0_course)
         features = content_feat + f0_feat
-        
+
         gt_decoder_inp = features[:, len_prompt_mel:, :]
         pt_decoder_inp = features[:, :len_prompt_mel, :]
 
@@ -313,7 +291,7 @@ class SoulXSingerSVC(nn.Module):
             n_timesteps=n_steps,
             cfg=cfg
         )
-        
+
         generated_audio = self.vocoder(generated_mel.transpose(1, 2)[0:1, ...])
         generated_audio = generated_audio.squeeze().float()
 

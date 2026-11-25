@@ -30,10 +30,6 @@ class MelSpectrogram(nn.Module):
         self.n_fft = n_fft
         self.hop_size = hop_size
         self.win_size = win_size
-        self.sampling_rate = sampling_rate
-        self.num_mels = num_mels
-        self.fmin = fmin
-        self.fmax = fmax
         self.center = center
 
         mel = librosa_mel_fn(
@@ -92,7 +88,6 @@ def load_mel_spectrogram_from_cfg(audio_cfg: Optional[Any] = None) -> MelSpectro
     Expected keys (either in dict or Hydra/OmegaConf object):
       - hop_size, sample_rate (or sampling_rate), n_fft, num_mels, win_size, fmin, fmax
     """
-    # Defaults keep current behavior.
     mel_cfg: Dict[str, Any] = {
         "hop_size": _get_from_mapping(audio_cfg, "hop_size", 480),
         "sampling_rate": _get_from_mapping(
