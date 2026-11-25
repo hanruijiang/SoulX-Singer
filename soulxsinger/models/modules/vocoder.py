@@ -412,28 +412,12 @@ class ISTFTHead(FourierHead):
             Tensor: Reconstructed time-domain audio signal of shape (B, T), where T is the length of the output signal.
         """
         x = self.out(x).transpose(1, 2)
-        mag, p = x.chunk(2, dim=1)
-        mag = torch.exp(mag)
-        mag = torch.clip(
-            mag, max=1e2
-        )  # safeguard to prevent excessively large magnitudes
-        # wrapping happens here. These two lines produce real and imaginary value
-        x = torch.cos(p)
-        y = torch.sin(p)
-        # recalculating phase here does not produce anything new
-        # only costs time
-        # phase = torch.atan2(y, x)
-        # S = mag * torch.exp(phase * 1j)
-        # better directly produce the complex value
-        
-        # Always compute complex values in float32 to avoid ComplexHalf warning (then cast audio back if needed)
-        orig_dtype = mag.dtype
-        mag, x, y = mag.float(), x.float(), y.float()
-        S = mag * (x + 1j * y)
-        audio = self.istft(S)
-        if orig_dtype != torch.float32:
-            audio = audio.to(orig_dtype)
-        return audio
+        # Reconstruct the spectrum and waveform in float32, even under CUDA AMP.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            mag, phase = x.float().chunk(2, dim=1)
+            mag = torch.exp(mag).clamp(max=1e2)
+            spectrum = torch.complex(mag * torch.cos(phase), mag * torch.sin(phase))
+            return self.istft(spectrum)
 
 
 class IMDCTSymExpHead(FourierHead):

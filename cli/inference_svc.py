@@ -17,8 +17,11 @@ def build_model(model_path, config, device="cuda", use_fp16=False):
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     del checkpoint
     if use_fp16 and torch.device(device).type == "cuda":
-        model.half()
-        model.mel.float()
+        # Keep mel analysis and the ISTFT window in their original float32 precision.
+        model.f0_encoder.half()
+        model.cfm_decoder.half()
+        model.vocoder.model.backbone.half()
+        model.vocoder.model.head.out.half()
     return model.eval().to(device)
 
 

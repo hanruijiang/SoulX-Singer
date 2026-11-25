@@ -220,25 +220,20 @@ class SoulXSingerSVC(nn.Module):
             else:
                 print("Warning: pitch_shift is True but note_pitch or f0 is None. Set f0_shift to 0.")
                 pitch_shift = 0
-        else:
-            pitch_shift = pitch_shift
-
         use_fp16 = use_fp16 and pt_wav.is_cuda
-        # mel is kept in fp32 (see build_model: model.mel.float() after model.half())
+        # Keep audio, F0 and mel analysis in float32; only neural features use fp16.
         pt_mel = self.mel(pt_wav.float() if pt_wav.dtype != torch.float32 else pt_wav)
         if use_fp16:
             pt_mel = pt_mel.half()
-            pt_wav = pt_wav.half()
-            gt_wav = gt_wav.half()
-            pt_f0 = pt_f0.half()
-            gt_f0 = gt_f0.half()
+        with _autocast_if(use_fp16):
+            pt_content_feat = self.whisper_encoder.encode(pt_wav, sr=self.audio_cfg.sample_rate)
 
         # if target audio is less than 30 seconds, infer the whole audio
         if gt_wav.shape[-1] < 30 * self.audio_cfg.sample_rate:
             with _autocast_if(use_fp16):
                 generated_audio = self.infer_segment(
                     pt_mel=pt_mel,
-                    pt_wav=pt_wav,
+                    pt_content_feat=pt_content_feat,
                     gt_wav=gt_wav,
                     pt_f0=pt_f0,
                     gt_f0=gt_f0,
@@ -249,8 +244,6 @@ class SoulXSingerSVC(nn.Module):
             return generated_audio, pitch_shift
 
         # if target audio is longer than 30 seconds, build vocal segments and infer each segment
-        generated_audio = []
-
         f0_rate = self.audio_cfg.sample_rate // self.audio_cfg.hop_size
         
         overlap_segments, segments = self.build_vocal_segments(
@@ -260,11 +253,15 @@ class SoulXSingerSVC(nn.Module):
             min_duration_sec=15.0,
             max_duration_sec=30.0,
         )
-        if len(segments) == 0:
-            segments = [(0.0, gt_wav.shape[-1] / self.audio_cfg.sample_rate)]
-            overlap_segments = [(0.0, gt_wav.shape[-1] / self.audio_cfg.sample_rate)]
+        if not segments:
+            # Sparse voiced audio must still respect Whisper's context limit.
+            overlap_segments, segments = self.build_vocal_segments(
+                gt_f0, f0_rate=f0_rate, uv_frames_th=10,
+                min_duration_sec=15.0, max_duration_sec=30.0,
+                ignore_silent_segments=False,
+            )
 
-        generated_audio = torch.zeros_like(gt_wav)
+        generated_audio = torch.zeros_like(gt_wav, dtype=torch.float32)
         for idx in tqdm(range(len(segments)), total=len(segments), desc="Inferring segments (SVC)", dynamic_ncols=True):
             overlap_start_sec, overlap_end_sec = overlap_segments[idx]
             seg_start_sec, seg_end_sec = segments[idx]
@@ -284,7 +281,7 @@ class SoulXSingerSVC(nn.Module):
             with _autocast_if(use_fp16):
                 segment_generated_audio = self.infer_segment(
                     pt_mel=pt_mel,
-                    pt_wav=pt_wav,
+                    pt_content_feat=pt_content_feat,
                     gt_wav=segment_gt_wav,
                     pt_f0=pt_f0,
                     gt_f0=segment_gt_f0,
@@ -301,7 +298,7 @@ class SoulXSingerSVC(nn.Module):
     
         return generated_audio, pitch_shift
 
-    def infer_segment(self, pt_mel, pt_wav, gt_wav, pt_f0, gt_f0, pitch_shift=0, n_steps=32, cfg=3):
+    def infer_segment(self, pt_mel, pt_content_feat, gt_wav, pt_f0, gt_f0, pitch_shift=0, n_steps=32, cfg=3):
         len_prompt_mel = pt_mel.shape[1]
         pt_f0 = F.pad(pt_f0, (0, max(0, len_prompt_mel - pt_f0.shape[1])))[:, :len_prompt_mel]
 
@@ -309,7 +306,6 @@ class SoulXSingerSVC(nn.Module):
         f0_course_gt = self.f0_to_coarse(gt_f0, f0_shift=pitch_shift * 5)
         f0_course = torch.cat([f0_course_pt, f0_course_gt], 1)
 
-        pt_content_feat = self.whisper_encoder.encode(pt_wav, sr=self.audio_cfg.sample_rate)
         gt_content_feat = self.whisper_encoder.encode(gt_wav, sr=self.audio_cfg.sample_rate)
         t_pt, t_gt = f0_course_pt.shape[1], f0_course_gt.shape[1]
         pt_content_feat = F.pad(pt_content_feat, (0, 0, 0, max(0, t_pt - pt_content_feat.shape[1])))[:, :t_pt, :]

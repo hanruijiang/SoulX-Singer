@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-import torch.nn as nn
 import torchaudio
 from transformers import WhisperFeatureExtractor, WhisperModel
 
@@ -19,8 +18,8 @@ class WhisperEncoder():
         device: Optional[str] = None,
     ) -> None:
         self.fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-base")
-        self.model = WhisperModel.from_pretrained("openai/whisper-base")
-        self.model = self.model.eval().to(device or "cpu")
+        model = WhisperModel.from_pretrained("openai/whisper-base")
+        self.model = model.encoder.eval().to(device or "cpu")
 
     def encode(
         self,
@@ -52,7 +51,7 @@ class WhisperEncoder():
             self.model = self.model.to(wav.device)
         attention_mask = inputs.attention_mask.to(wav.device) if inputs.attention_mask is not None else None
 
-        encoder_out = self.model.encoder(input_features).last_hidden_state
+        encoder_out = self.model(input_features).last_hidden_state
 
         if attention_mask is not None:
             valid_mel_frames = attention_mask.sum(dim=1)

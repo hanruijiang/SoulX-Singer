@@ -272,7 +272,7 @@ class DiffLlama(LlamaModel):
             if output_hidden_states is not None
             else self.config.output_hidden_states
         )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        use_cache = False
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -357,7 +357,8 @@ class DiffLlama(LlamaModel):
                 )
 
             hidden_states = layer_outputs[0]
-            all_layer_hidden_states.append(hidden_states.clone())
+            if return_dict:
+                all_layer_hidden_states.append(hidden_states.clone())
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
