@@ -49,7 +49,7 @@ class SoulXSingerSVC(nn.Module):
         uv_mask = f0 <= 0    
 
         if is_torch:  
-            f0_safe = torch.maximum(f0, torch.tensor(f0_min))
+            f0_safe = torch.maximum(f0, f0.new_tensor(f0_min))
             f0_cents = 1200 * torch.log2(f0_safe / f0_min)
         else:
             f0_safe = np.maximum(f0, f0_min)
@@ -154,7 +154,11 @@ class SoulXSingerSVC(nn.Module):
         segment_start, segment_end = 0, 1
         
         while segment_start < len(split_points) - 1:
-            while segment_end < len(split_points) and (split_points[segment_end] - split_points[segment_start]) < min_frames:
+            while (
+                segment_end < len(split_points) - 1
+                and (split_points[segment_end] - split_points[segment_start]) < min_frames
+                and (split_points[segment_end + 1] - split_points[segment_start]) <= max_frames
+            ):
                 segment_end += 1
 
             if segment_end >= len(split_points):
@@ -290,7 +294,7 @@ class SoulXSingerSVC(nn.Module):
                 )
 
             segment_start = int(round(seg_start_sec * self.audio_cfg.sample_rate))
-            segment_end = int(round(seg_end_sec * self.audio_cfg.sample_rate))
+            segment_end = min(gt_wav.shape[-1], int(round(seg_end_sec * self.audio_cfg.sample_rate)))
             segment_generated_audio = segment_generated_audio[segment_start - wav_start: segment_end - wav_start]
 
             generated_audio[:, segment_start:segment_end] = segment_generated_audio
@@ -299,7 +303,7 @@ class SoulXSingerSVC(nn.Module):
 
     def infer_segment(self, pt_mel, pt_wav, gt_wav, pt_f0, gt_f0, pitch_shift=0, n_steps=32, cfg=3):
         len_prompt_mel = pt_mel.shape[1]
-        pt_f0 = F.pad(pt_f0, (0, 0, 0, max(0, len_prompt_mel - pt_f0.shape[1])))[:, :len_prompt_mel]
+        pt_f0 = F.pad(pt_f0, (0, max(0, len_prompt_mel - pt_f0.shape[1])))[:, :len_prompt_mel]
 
         f0_course_pt = self.f0_to_coarse(pt_f0)
         f0_course_gt = self.f0_to_coarse(gt_f0, f0_shift=pitch_shift * 5)
