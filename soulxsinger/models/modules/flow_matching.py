@@ -79,9 +79,9 @@ class FlowMatchingTransformer(nn.Module):
         prompt_len = prompt.shape[1]
         target_len = cond.shape[1] - prompt_len
 
-        if x_mask == None:
+        if x_mask is None:
             x_mask = torch.ones(cond.shape[0], target_len).to(cond.device)  # (B, T)
-        if prompt_mask == None:
+        if prompt_mask is None:
             prompt_mask = torch.ones(cond.shape[0], prompt_len).to(
                 cond.device
             )  # (B, prompt_len)
@@ -108,14 +108,17 @@ class FlowMatchingTransformer(nn.Module):
                 uncond_flow_pred = self.diff_estimator(
                     xt, t, torch.zeros_like(cond)[:, : xt.shape[1], :], x_mask
                 )
-                pos_flow_pred_std = flow_pred.std()
-                flow_pred_cfg = flow_pred + cfg * (flow_pred - uncond_flow_pred)
-                rescale_flow_pred = (
-                    flow_pred_cfg * pos_flow_pred_std / flow_pred_cfg.std()
-                )
+                output_dtype = flow_pred.dtype
+                pos_pred = flow_pred.float()
+                neg_pred = uncond_flow_pred.float()
+                flow_pred_cfg = pos_pred + cfg * (pos_pred - neg_pred)
+                pos_std = pos_pred.std()
+                cfg_std = flow_pred_cfg.std().clamp_min(1e-6)
+                rescale_flow_pred = flow_pred_cfg * (pos_std / cfg_std)
                 flow_pred = (
-                    rescale_cfg * rescale_flow_pred + (1 - rescale_cfg) * flow_pred_cfg
-                )
+                    rescale_cfg * rescale_flow_pred
+                    + (1 - rescale_cfg) * flow_pred_cfg
+                ).to(output_dtype)
 
             dxt = flow_pred * h
             xt = xt + dxt

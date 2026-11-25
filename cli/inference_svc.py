@@ -6,6 +6,27 @@ import math
 from pathlib import Path
 
 
+def validate_config(config):
+    fixed = (
+        ("audio", config.audio, {
+            "sample_rate": 24000, "hop_size": 480, "n_fft": 1920,
+            "win_size": 1920, "num_mels": 128, "fmin": 0, "fmax": 12000,
+            "mel_mean": -4.92, "mel_var": 8.14,
+        }),
+        ("model.encoder", config.model.encoder, {
+            "f0_bin": 361, "f0_dim": 512,
+        }),
+        ("model.flow_matching", config.model.flow_matching, {
+            "mel_dim": 128, "hidden_size": 1024, "num_layers": 22,
+            "num_heads": 16, "cond_codebook_size": 512,
+        }),
+    )
+    for section, values, expected in fixed:
+        for key, value in expected.items():
+            if values.get(key) != value:
+                raise ValueError(f"{section}.{key} must be {value}")
+
+
 def build_model(model_path, config, device="cuda", use_fp16=False):
     import torch
     from soulxsinger.models.soulxsinger_svc import SoulXSingerSVC
@@ -30,6 +51,14 @@ def process(args, config, model=None):
     import soundfile as sf
     import torch
     from soulxsinger.utils.audio_utils import load_wav
+
+    validate_config(config)
+    n_steps = args.n_steps if args.n_steps is not None else config.infer.n_steps
+    cfg = args.cfg if args.cfg is not None else config.infer.cfg
+    if type(n_steps) is not int or n_steps <= 0:
+        raise ValueError("n_steps must be a positive integer")
+    if not math.isfinite(cfg):
+        raise ValueError("cfg must be finite")
 
     sample_rate = config.audio.sample_rate
     hop_size = config.audio.hop_size
@@ -83,8 +112,8 @@ def process(args, config, model=None):
             gt_wav=gt_wav.to(args.device),
             pt_f0=pt_f0, gt_f0=gt_f0,
             auto_shift=args.auto_shift, pitch_shift=args.pitch_shift,
-            n_steps=args.n_steps if args.n_steps is not None else config.infer.n_steps,
-            cfg=args.cfg if args.cfg is not None else config.infer.cfg,
+            n_steps=n_steps,
+            cfg=cfg,
             use_fp16=use_fp16,
         )
     save_dir = Path(args.save_dir)
@@ -117,10 +146,6 @@ def build_parser():
 if __name__ == "__main__":
     parser = build_parser()
     args = parser.parse_args()
-    if args.n_steps is not None and args.n_steps <= 0:
-        parser.error("--n_steps must be positive")
-    if args.cfg is not None and not math.isfinite(args.cfg):
-        parser.error("--cfg must be finite")
     from soulxsinger.utils.file_utils import load_config
 
     process(args, load_config(args.config))

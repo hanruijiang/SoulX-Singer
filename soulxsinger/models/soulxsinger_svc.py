@@ -88,7 +88,6 @@ class SoulXSingerSVC(nn.Module):
         min_duration_sec: float = 5.0,
         max_duration_sec: float = 30.0,
         num_overlaps: int = 1,
-        ignore_silent_segments: bool = True,
     ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
         """Build vocal segments based on F0 contour. First split by long silent runs, then merge into segments based on min and max duration constraints.
         args:
@@ -98,11 +97,13 @@ class SoulXSingerSVC(nn.Module):
             min_duration_sec: minimum duration of each segment in seconds
             max_duration_sec: maximum duration of each segment in seconds
             num_overlaps: number of overlapping segments to create for each non-overlapping segment (for smooth inference)
-            ignore_silent_segments: whether to ignore segments that are mostly silent (e.g., > 95% zero F0)
         returns:
             overlap_segments: list of (overlap_start_sec, overlap_end_sec) for each segment, which may overlap with adjacent segments for smooth inference
             segments: list of (seg_start_sec, seg_end_sec) for each segment, which are non-overlapping and used for final merging
         """
+        if num_overlaps < 0:
+            raise ValueError("num_overlaps must be nonnegative")
+
         if isinstance(f0, torch.Tensor):
             f0_np = f0.detach().float().cpu().numpy()
         else:
@@ -140,15 +141,25 @@ class SoulXSingerSVC(nn.Module):
                 idx += 1
         append_split_point(total_frames)
 
-        segments: List[Tuple[int, int]] = []
-        overlap_segments: List[Tuple[int, int]] = []
+        segments: List[Tuple[float, float]] = []
+        overlap_segments: List[Tuple[float, float]] = []
 
-        def append_segment(start_idx: int, end_idx: int, num_overlaps: int = num_overlaps):
-            segments.append((split_points[start_idx] / f0_rate, split_points[end_idx] / f0_rate))
-            overlap_start_idx = start_idx
-            if start_idx > 0 and (split_points[end_idx] - split_points[start_idx - num_overlaps]) <= max_frames:
-                overlap_start_idx = start_idx - num_overlaps
-            overlap_segments.append((split_points[overlap_start_idx] / f0_rate, split_points[end_idx] / f0_rate))
+        def append_segment(start_idx: int, end_idx: int):
+            start = split_points[start_idx]
+            end = split_points[end_idx]
+            segments.append((start / f0_rate, end / f0_rate))
+
+            candidate = split_points[max(0, start_idx - num_overlaps)]
+            overlap_start = candidate if end - candidate <= max_frames else start
+            overlap_end = end
+
+            # Give very short segments enough audio for the Whisper frontend.
+            context_frames = min(max_frames, max(1, int(round(0.1 * f0_rate))))
+            if overlap_end - overlap_start < context_frames:
+                overlap_start = max(0, overlap_end - context_frames)
+                overlap_end = min(total_frames, overlap_start + context_frames)
+
+            overlap_segments.append((overlap_start / f0_rate, overlap_end / f0_rate))
 
         segment_start, segment_end = 0, 1
         
@@ -161,24 +172,11 @@ class SoulXSingerSVC(nn.Module):
                 segment_end += 1
 
             if segment_end >= len(split_points):
-                append_segment(segment_start, len(split_points) - 1, num_overlaps=num_overlaps)
+                append_segment(segment_start, len(split_points) - 1)
                 break
-            append_segment(segment_start, segment_end, num_overlaps=num_overlaps)
+            append_segment(segment_start, segment_end)
             segment_start = segment_end
             segment_end = segment_start + 1
-
-        if ignore_silent_segments:
-            filtered_idx = []
-            for i, seg in enumerate(overlap_segments):
-                start_frame = int(seg[0] * f0_rate)
-                end_frame = int(seg[1] * f0_rate)
-                total_frames = end_frame - start_frame
-                voice_frames = np.sum(f0_np[start_frame:end_frame] > 0)
-                if voice_frames / total_frames > 0.05 and voice_frames >= 10:   # at least 10 voiced frames and >5% voiced frames
-                    filtered_idx.append(i)
-
-            overlap_segments = [overlap_segments[i] for i in filtered_idx]
-            segments = [segments[i] for i in filtered_idx]
 
         return overlap_segments, segments
     
@@ -250,14 +248,6 @@ class SoulXSingerSVC(nn.Module):
             min_duration_sec=15.0,
             max_duration_sec=30.0,
         )
-        if not segments:
-            # Sparse voiced audio must still respect Whisper's context limit.
-            overlap_segments, segments = self.build_vocal_segments(
-                gt_f0, f0_rate=f0_rate, uv_frames_th=10,
-                min_duration_sec=15.0, max_duration_sec=30.0,
-                ignore_silent_segments=False,
-            )
-
         generated_audio = torch.zeros_like(gt_wav, dtype=torch.float32)
         for idx in tqdm(range(len(segments)), total=len(segments), desc="Inferring segments (SVC)", dynamic_ncols=True):
             overlap_start_sec, overlap_end_sec = overlap_segments[idx]
