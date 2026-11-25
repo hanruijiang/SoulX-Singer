@@ -2,7 +2,6 @@
 torch==2.2.0
 torchaudio==2.2.0
 transformers==4.41.2
-accelerate==1.11.0
 huggingface_hub>=0.34,<1.0
 numpy==1.26.4
 scipy==1.15.3
