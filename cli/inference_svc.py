@@ -73,7 +73,7 @@ def process(args, config, model=None):
     pt_f0 = get_f0(args.prompt_f0_path, args.prompt_wav_path, pt_wav)
     gt_f0 = get_f0(args.target_f0_path, args.target_wav_path, gt_wav)
     del extractor
-    use_fp16 = getattr(args, "use_fp16", getattr(args, "fp16", False))
+    use_fp16 = args.fp16
     if model is None:
         model = build_model(args.model_path, config, args.device, use_fp16)
 
@@ -93,9 +93,6 @@ def process(args, config, model=None):
     sf.write(output, audio.squeeze().float().cpu().numpy(), sample_rate)
     print(f"Generated audio: {output} (pitch shift: {shift} semitones)")
 
-
-def main(args, config):
-    process(args, config)
 
 
 def build_parser():
@@ -126,4 +123,4 @@ if __name__ == "__main__":
         parser.error("--cfg must be finite")
     from soulxsinger.utils.file_utils import load_config
 
-    main(args, load_config(args.config))
+    process(args, load_config(args.config))

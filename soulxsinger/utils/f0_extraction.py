@@ -199,19 +199,12 @@ class E2E(nn.Module):
         super(E2E, self).__init__()
         self.unet = DeepUnet(kernel_size, n_blocks, en_de_layers, inter_layers, in_channels, en_out_channels)
         self.cnn = nn.Conv2d(en_out_channels, 3, (3, 3), padding=(1, 1))
-        if n_gru:
-            self.fc = nn.Sequential(
-                BiGRU(3 * 128, 256, n_gru),
-                nn.Linear(512, 360),
-                nn.Dropout(0.25),
-                nn.Sigmoid(),
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Linear(3 * 128, 360),
-                nn.Dropout(0.25),
-                nn.Sigmoid()
-            )
+        self.fc = nn.Sequential(
+            BiGRU(3 * 128, 256, n_gru),
+            nn.Linear(512, 360),
+            nn.Dropout(0.25),
+            nn.Sigmoid(),
+        )
 
     def forward(self, mel):
         mel = mel.transpose(-1, -2).unsqueeze(1)
@@ -237,7 +230,7 @@ class MelSpectrogram(torch.nn.Module):
         )
         mel_basis = torch.from_numpy(mel_basis).float()
         self.register_buffer("mel_basis", mel_basis)
-        self.n_fft = win_length if n_fft is None else n_fft
+        self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
         self.sampling_rate = sampling_rate
@@ -245,33 +238,21 @@ class MelSpectrogram(torch.nn.Module):
         self.clamp = clamp
         self.is_half = is_half
 
-    def forward(self, audio, keyshift=0, speed=1, center=True):
-        factor = 2 ** (keyshift / 12)
-        n_fft_new = int(np.round(self.n_fft * factor))
-        win_length_new = int(np.round(self.win_length * factor))
-        hop_length_new = int(np.round(self.hop_length * speed))
-        
-        keyshift_key = str(keyshift) + "_" + str(audio.device)
-        if keyshift_key not in self.hann_window:
-            self.hann_window[keyshift_key] = torch.hann_window(win_length_new).to(audio.device)
+    def forward(self, audio, center=True):
+        device_key = str(audio.device)
+        if device_key not in self.hann_window:
+            self.hann_window[device_key] = torch.hann_window(self.win_length).to(audio.device)
         
         fft = torch.stft(
             audio,
-            n_fft=n_fft_new,
-            hop_length=hop_length_new,
-            win_length=win_length_new,
-            window=self.hann_window[keyshift_key],
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
+            window=self.hann_window[device_key],
             center=center,
             return_complex=True,
         )
         magnitude = torch.sqrt(fft.real.pow(2) + fft.imag.pow(2))
-        
-        if keyshift != 0:
-            size = self.n_fft // 2 + 1
-            resize = magnitude.size(1)
-            if resize < size:
-                magnitude = F.pad(magnitude, (0, 0, 0, size - resize))
-            magnitude = magnitude[:, :size, :] * self.win_length / win_length_new
         
         mel_output = torch.matmul(self.mel_basis, magnitude)
         if self.is_half:
@@ -300,8 +281,10 @@ class RMVPE:
         ).to(self.device)
         
         model = E2E(n_blocks=4, n_gru=1, kernel_size=(2, 2))
-        ckpt = torch.load(model_path, map_location=self.device)
-        model.load_state_dict(ckpt)
+        # Preserve the original trusted-checkpoint loading semantics on Torch 2.2.
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(ckpt, strict=True)
+        del ckpt
         model.eval()
         
         if is_half:
@@ -374,7 +357,7 @@ class F0Extractor:
 
     Wrapper around an RMVPE network that:
         1) loads the checkpoint once in ``__init__``
-        2) exposes a simple :py:meth:`process` API and optionally saves ``*_f0.npy``.
+        2) exposes a simple :py:meth:`process` API.
     """
     def __init__(
         self,
@@ -472,12 +455,11 @@ class F0Extractor:
 
         return f0
 
-    def process(self, audio_path: str, *, f0_path: str | None = None, verbose: Optional[bool] = None) -> np.ndarray:
+    def process(self, audio_path: str, *, verbose: Optional[bool] = None) -> np.ndarray:
         """Run f0 extraction for a single wav.
 
         Args:
             audio_path: Path to the input wav file.
-            f0_path: if is not None, save the f0 data to this path.
             verbose: Override instance-level verbose flag for this call.
 
         Returns:
@@ -508,7 +490,5 @@ class F0Extractor:
                 f"voiced_ratio={voiced_ratio:.3f}",
                 f"time={dt:.3f}s",
             )
-        if f0_path is not None:
-            np.save(f0_path, f0)
 
         return f0

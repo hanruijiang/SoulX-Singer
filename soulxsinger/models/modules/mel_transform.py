@@ -1,34 +1,16 @@
 import torch
 import math
-import numpy as np
 from librosa.filters import mel as librosa_mel_fn
 import torch.nn as nn
 from typing import Any, Dict, Optional
-
-
-def dynamic_range_compression(x, C=1, clip_val=1e-5):
-    return np.log(np.clip(x, a_min=clip_val, a_max=None) * C)
-
-
-def dynamic_range_decompression(x, C=1):
-    return np.exp(x) / C
 
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
 
 
-def dynamic_range_decompression_torch(x, C=1):
-    return torch.exp(x) / C
-
-
 def spectral_normalize_torch(magnitudes):
     output = dynamic_range_compression_torch(magnitudes)
-    return output
-
-
-def spectral_de_normalize_torch(magnitudes):
-    output = dynamic_range_decompression_torch(magnitudes)
     return output
 
 
@@ -53,9 +35,6 @@ class MelSpectrogram(nn.Module):
         self.fmin = fmin
         self.fmax = fmax
         self.center = center
-
-        mel_basis = {}
-        hann_window = {}
 
         mel = librosa_mel_fn(
             sr=sampling_rate, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax
@@ -96,10 +75,6 @@ class MelSpectrogram(nn.Module):
         spec = spectral_normalize_torch(spec)
 
         return spec
-
-
-def load_mel_spectrogram():
-    return load_mel_spectrogram_from_cfg(None)
 
 
 def _get_from_mapping(cfg: Any, key: str, default: Any = None) -> Any:

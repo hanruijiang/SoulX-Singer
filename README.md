@@ -7,7 +7,7 @@ CLI-only singing voice conversion (SVC) based on [SoulX-Singer](https://github.c
 Python 3.10 is recommended. Install PyTorch/Torchaudio for your platform and CUDA version as appropriate; the requirements retain the original repository's Torch/Transformers version pair.
 
 ```bash
-git clone https://github.com/hanruijiang/SoulX-Singer.git
+git clone -b refactor/svc-cli-only --single-branch https://github.com/hanruijiang/SoulX-Singer.git
 cd SoulX-Singer
 conda create -n soulxsinger-svc python=3.10 -y
 conda activate soulxsinger-svc
@@ -28,11 +28,11 @@ Whisper Base is downloaded automatically from `openai/whisper-base` on first mod
 hf download Soul-AILab/SoulX-Singer-Preprocess rmvpe/rmvpe.pt --local-dir pretrained_models
 ```
 
-No RMVPE weights are needed if both F0 arrays are supplied. Only load trusted checkpoints. For offline inference, cache Whisper and download the required weights beforehand.
+No RMVPE weights are needed if both F0 arrays are supplied. Only load trusted checkpoints (the loaders explicitly use `weights_only=False`). For offline inference, cache Whisper and download the required weights beforehand.
 
 ## CLI inference
 
-Run from the repository root. The prompt is a reference clip of the desired singer (0.1–30 seconds). The target is the source singing to convert; use isolated vocals without accompaniment. Input audio is converted to mono and resampled to 24 kHz. Long targets are segmented by the SVC model.
+Run from the repository root. The prompt is a reference clip of the desired singer (0.1–30 seconds). The target is the source singing to convert; use isolated vocals without accompaniment. Input audio is converted to mono and resampled to 24 kHz. Long targets are segmented by the SVC model into windows of at most 30 seconds. Automatic RMVPE extraction still processes the complete input before SVC segmentation; for very long audio with limited memory, supply precomputed F0.
 
 ### Convert your own audio (automatic F0 extraction)
 
@@ -64,7 +64,7 @@ The result is written to `<save_dir>/generated.wav` at 24 kHz.
 | `--pitch_shift` | Manual shift in semitones; nonzero overrides automatic shift |
 | `--n_steps` | Flow matching steps (default 32) |
 | `--cfg` | Classifier-free guidance scale (default 3) |
-| `--fp16` | Half precision on CUDA |
+| `--fp16` | Mixed precision on CUDA; audio/F0, mel analysis, ISTFT and output waveform remain float32 |
 
 ```bash
 python -m cli.inference_svc --help

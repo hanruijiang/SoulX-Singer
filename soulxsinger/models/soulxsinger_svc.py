@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Dict, List, Tuple
 from contextlib import nullcontext
 
 from soulxsinger.models.modules.vocoder import Vocoder
@@ -139,7 +139,6 @@ class SoulXSingerSVC(nn.Module):
             else:
                 idx += 1
         append_split_point(total_frames)
-        # print(f"Initial split points (in seconds): {[round(p / f0_rate, 2) for p in split_points]}")
 
         segments: List[Tuple[int, int]] = []
         overlap_segments: List[Tuple[int, int]] = []
@@ -168,7 +167,6 @@ class SoulXSingerSVC(nn.Module):
             segment_start = segment_end
             segment_end = segment_start + 1
 
-        # print(f"Final segments (overlap_start, overlap_end, seg_start_time, seg_end_time) in seconds: {overlap_segments}")
         if ignore_silent_segments:
             filtered_idx = []
             for i, seg in enumerate(overlap_segments):
@@ -181,16 +179,15 @@ class SoulXSingerSVC(nn.Module):
 
             overlap_segments = [overlap_segments[i] for i in filtered_idx]
             segments = [segments[i] for i in filtered_idx]
-            # print(f"Filtered segments with mostly silence removed: {overlap_segments}")
 
         return overlap_segments, segments
     
     def infer(
         self, 
-        pt_wav: str|torch.Tensor,
-        gt_wav: str|torch.Tensor,
-        pt_f0: str|torch.Tensor,
-        gt_f0: str|torch.Tensor,
+        pt_wav: torch.Tensor,
+        gt_wav: torch.Tensor,
+        pt_f0: torch.Tensor,
+        gt_f0: torch.Tensor,
         auto_shift=False,
         pitch_shift=0,
         n_steps=32,
@@ -200,12 +197,12 @@ class SoulXSingerSVC(nn.Module):
         """
         SVC inference pipeline. First build vocal segments based on F0 contour, then run inference for each segment and merge results.
         args:
-            pt_wav: prompt waveform path or tensor
-            gt_wav: target waveform path or tensor
-            pt_f0: prompt F0 path or tensor
-            gt_f0: target F0 path or tensor
+            pt_wav: prompt waveform tensor
+            gt_wav: target waveform tensor
+            pt_f0: prompt F0 tensor
+            gt_f0: target F0 tensor
             auto_shift: whether to automatically calculate pitch shift based on median F0 of prompt and target
-            pitch_shift: manual pitch shift in semitones (overrides auto_shift if > 0)
+            pitch_shift: manual pitch shift in semitones (overrides auto_shift if nonzero)
             n_steps: number of diffusion steps for inference
             cfg: classifier-free guidance scale for inference
             use_fp16: if True, run in FP16 except mel extraction to save memory and speed.
