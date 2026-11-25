@@ -5,7 +5,6 @@ infer:
 audio:
   hop_size: 480
   sample_rate: 24000
-  max_length: 36000
   n_fft: 1920
   num_mels: 128
   win_size: 1920
@@ -16,14 +15,8 @@ audio:
 
 model:
   encoder:
-    vocab_size: 3000
-    text_dim: 512
-    pitch_dim: 512
-    type_dim: 512
     f0_bin: 361
     f0_dim: 512
-    num_layers: 4
-
   flow_matching:
     mel_dim: 128
     hidden_size: 1024

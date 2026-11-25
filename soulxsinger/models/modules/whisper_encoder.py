@@ -20,7 +20,7 @@ class WhisperEncoder():
     ) -> None:
         self.fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-base")
         self.model = WhisperModel.from_pretrained("openai/whisper-base")
-        self.model = self.model.to(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.model = self.model.eval().to(device or "cpu")
 
     def encode(
         self,
@@ -64,11 +64,3 @@ class WhisperEncoder():
                 encoder_out[0, valid_len:, :] = 0
 
         return encoder_out
-
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    audio = torch.randn(1, 24000 * 25).float().to("cuda")
-    encoder = WhisperEncoder()
-    whisper_encoder_out = encoder.encode(audio, sr=24000)
-    print(whisper_encoder_out.shape)

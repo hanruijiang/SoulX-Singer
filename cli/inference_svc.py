@@ -1,130 +1,126 @@
-import os
-import torch
-import json
+"""Command-line inference for SoulX-Singer-SVC."""
+from __future__ import annotations
+
 import argparse
-from tqdm import tqdm
-import numpy as np
-import soundfile as sf
-from collections import OrderedDict
-from omegaconf import DictConfig
-
-from soulxsinger.utils.file_utils import load_config
-from soulxsinger.models.soulxsinger_svc import SoulXSingerSVC
-from soulxsinger.utils.audio_utils import load_wav
+import math
+from pathlib import Path
 
 
-def build_model(
-    model_path: str,
-    config: DictConfig,
-    device: str = "cuda",
-    use_fp16: bool = False,
-):
-    """
-    Build the model from the pre-trained model path and model configuration.
+def build_model(model_path, config, device="cuda", use_fp16=False):
+    import torch
+    from soulxsinger.models.soulxsinger_svc import SoulXSingerSVC
 
-    Args:
-        model_path (str): Path to the checkpoint file.
-        config (DictConfig): Model configuration.
-        device (str, optional): Device to use. Defaults to "cuda".
-        use_fp16 (bool, optional): If True and device is CUDA, convert model to FP16 after load. Defaults to False.
-
-    Returns:
-        SoulXSingerSVC: The initialized model.
-    """
-
-    if not os.path.isfile(model_path):
-        raise FileNotFoundError(
-            f"Model checkpoint not found: {model_path}. "
-            "Please download the pretrained model and place it at the path, or set --model_path."
-        )
-    model = SoulXSingerSVC(config).to(device)
-    print("Model initialized.")
-    print("Model parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
-    
+    if not Path(model_path).is_file():
+        raise FileNotFoundError(f"SVC checkpoint not found: {model_path}")
+    model = SoulXSingerSVC(config)
     checkpoint = torch.load(model_path, weights_only=False, map_location="cpu")
-    if "state_dict" not in checkpoint:
-        raise KeyError(
-            f"Checkpoint at {model_path} has no 'state_dict' key. "
-            "Expected a checkpoint saved with model.state_dict()."
-        )
     model.load_state_dict(checkpoint["state_dict"], strict=True)
-    
-    if use_fp16 and ((isinstance(device, str) and device.startswith("cuda")) or (hasattr(device, "type") and getattr(device, "type", None) == "cuda")):
+    del checkpoint
+    if use_fp16 and torch.device(device).type == "cuda":
         model.half()
         model.mel.float()
-        print("Model converted to FP16 (mel kept in FP32).")
-    print("Model checkpoint loaded.")
-    model.eval()
-    model.to(device)
-
-    return model
+    return model.eval().to(device)
 
 
-def process(args, config, model: torch.nn.Module):
-    """Run the full inference pipeline given a data_processor and model.
-    """
+def process(args, config, model=None):
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from soulxsinger.utils.audio_utils import load_wav
 
-    os.makedirs(args.save_dir, exist_ok=True)
-    pt_wav = load_wav(args.prompt_wav_path, config.audio.sample_rate).to(args.device)
-    gt_wav = load_wav(args.target_wav_path, config.audio.sample_rate).to(args.device)
-    pt_f0 = torch.from_numpy(np.load(args.prompt_f0_path)).unsqueeze(0).to(args.device)
-    gt_f0 = torch.from_numpy(np.load(args.target_f0_path)).unsqueeze(0).to(args.device)
+    sample_rate = config.audio.sample_rate
+    hop_size = config.audio.hop_size
+    pt_wav = load_wav(args.prompt_wav_path, sample_rate)
+    gt_wav = load_wav(args.target_wav_path, sample_rate)
+    if pt_wav.shape[-1] < sample_rate // 10 or gt_wav.shape[-1] < sample_rate // 10:
+        raise ValueError("Both audio inputs must be at least 0.1 seconds long.")
+    if pt_wav.shape[-1] > 30 * sample_rate:
+        raise ValueError("Prompt audio must be at most 30 seconds (Whisper context limit).")
 
-    n_step = args.n_steps if hasattr(args, "n_steps") else config.infer.n_steps
-    cfg = args.cfg if hasattr(args, "cfg") else config.infer.cfg
+    extractor = None
+    if not args.prompt_f0_path or not args.target_f0_path:
+        from soulxsinger.utils.f0_extraction import F0Extractor
+
+        if not Path(args.rmvpe_path).is_file():
+            raise FileNotFoundError(
+                f"RMVPE checkpoint not found: {args.rmvpe_path}. "
+                "Download it or supply both F0 .npy files."
+            )
+        extractor = F0Extractor(
+            str(args.rmvpe_path), device=args.device,
+            target_sr=sample_rate, hop_size=hop_size,
+            max_duration=max(pt_wav.shape[-1], gt_wav.shape[-1]) / sample_rate + 1,
+        )
+
+    def get_f0(path, audio_path, waveform):
+        f0 = np.load(path, allow_pickle=False) if path else extractor.process(audio_path)
+        f0 = np.asarray(f0, dtype=np.float32).squeeze()
+        if f0.ndim != 1 or not f0.size or not np.isfinite(f0).all() or (f0 < 0).any():
+            raise ValueError(f"Expected a finite nonnegative F0 vector: {path or audio_path}")
+        frames = math.ceil(waveform.shape[-1] / hop_size)
+        if abs(len(f0) - frames) > 2:
+            raise ValueError(
+                f"F0 length {len(f0)} does not match {frames} audio frames: {path or audio_path}"
+            )
+        f0 = np.pad(f0, (0, max(0, frames - len(f0))))[:frames]
+        if not (f0 > 0).any():
+            raise ValueError(f"No voiced F0 frames: {path or audio_path}")
+        return torch.from_numpy(f0).unsqueeze(0).to(args.device)
+
+    pt_f0 = get_f0(args.prompt_f0_path, args.prompt_wav_path, pt_wav)
+    gt_f0 = get_f0(args.target_f0_path, args.target_wav_path, gt_wav)
+    del extractor
+    use_fp16 = getattr(args, "use_fp16", getattr(args, "fp16", False))
+    if model is None:
+        model = build_model(args.model_path, config, args.device, use_fp16)
 
     with torch.no_grad():
-        generated_audio, generated_shift = model.infer(
-            pt_wav=pt_wav,
-            gt_wav=gt_wav,
-            pt_f0=pt_f0,
-            gt_f0=gt_f0,
-            auto_shift=args.auto_shift, 
-            pitch_shift=args.pitch_shift, 
-            n_steps=n_step, 
-            cfg=cfg,
-            use_fp16=args.use_fp16,
+        audio, shift = model.infer(
+            pt_wav=pt_wav.to(args.device),
+            gt_wav=gt_wav.to(args.device),
+            pt_f0=pt_f0, gt_f0=gt_f0,
+            auto_shift=args.auto_shift, pitch_shift=args.pitch_shift,
+            n_steps=args.n_steps if args.n_steps is not None else config.infer.n_steps,
+            cfg=args.cfg if args.cfg is not None else config.infer.cfg,
+            use_fp16=use_fp16,
         )
-    generated_audio = generated_audio.squeeze().float().cpu().numpy()
-    if args.pitch_shift != generated_shift:
-        args.pitch_shift = generated_shift
-        # print(f"Applied pitch shift of {generated_shift} semitones to match GT F0 contour.")
-
-    sf.write(os.path.join(args.save_dir, "generated.wav"), generated_audio, config.audio.sample_rate)
-    print(f"Generated audio saved to {os.path.join(args.save_dir, 'generated.wav')}")
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    output = save_dir / "generated.wav"
+    sf.write(output, audio.squeeze().float().cpu().numpy(), sample_rate)
+    print(f"Generated audio: {output} (pitch shift: {shift} semitones)")
 
 
 def main(args, config):
-    model = build_model(
-        model_path=args.model_path,
-        config=config,
-        device=args.device,
-        use_fp16=getattr(args, "use_fp16", False),
-    )
-    process(args, config, model)
+    process(args, config)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--model_path", type=str, default='pretrained_models/soulx-singer/model.pt')
-    parser.add_argument("--config", type=str, default='soulxsinger/config/soulxsinger.yaml')
-    parser.add_argument("--prompt_wav_path", type=str, default='example/audio/zh_prompt.wav')
-    parser.add_argument("--target_wav_path", type=str, default='example/audio/zh_target.wav')
-    parser.add_argument("--prompt_f0_path", type=str, default='example/audio/zh_prompt_f0.npy')
-    parser.add_argument("--target_f0_path", type=str, default='example/audio/zh_target_f0.npy')
-    parser.add_argument("--save_dir", type=str, default='outputs')
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--model_path", default="pretrained_models/SoulX-Singer/model-svc.pt")
+    parser.add_argument("--config", default="soulxsinger/config/soulxsinger.yaml")
+    parser.add_argument("--prompt_wav_path", required=True, help="Reference singer audio (dry vocals)")
+    parser.add_argument("--target_wav_path", required=True, help="Source singing audio (dry vocals)")
+    parser.add_argument("--prompt_f0_path", help="Optional reference F0 .npy (Hz, 50 frames/s)")
+    parser.add_argument("--target_f0_path", help="Optional source F0 .npy (Hz, 50 frames/s)")
+    parser.add_argument("--rmvpe_path", default="pretrained_models/rmvpe/rmvpe.pt")
+    parser.add_argument("--save_dir", default="outputs")
     parser.add_argument("--auto_shift", action="store_true")
     parser.add_argument("--pitch_shift", type=int, default=0)
-    parser.add_argument("--n_steps", type=int, default=32)
-    parser.add_argument("--cfg", type=float, default=3.0)
-    parser.add_argument(
-        "--fp16",
-        action="store_true",
-        default=False,
-        help="Use FP16 inference (faster on GPU)",
-    )
-    args = parser.parse_args()
-    args.use_fp16 = args.fp16
+    parser.add_argument("--n_steps", type=int, help="Flow matching steps (default: config)")
+    parser.add_argument("--cfg", type=float, help="Guidance scale (default: config)")
+    parser.add_argument("--fp16", action="store_true", help="Use half precision on CUDA")
+    return parser
 
-    config = load_config(args.config)
-    main(args, config)
+
+if __name__ == "__main__":
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.n_steps is not None and args.n_steps <= 0:
+        parser.error("--n_steps must be positive")
+    if args.cfg is not None and not math.isfinite(args.cfg):
+        parser.error("--cfg must be finite")
+    from soulxsinger.utils.file_utils import load_config
+
+    main(args, load_config(args.config))

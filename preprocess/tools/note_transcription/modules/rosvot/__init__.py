@@ -1,1 +1,0 @@
-"""Core ROSVOT model components."""
