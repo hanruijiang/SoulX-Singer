@@ -1,16 +1,13 @@
 # https://github.com/Dream-High/RMVPE
-import math
-import time
-import librosa
 import numpy as np
 from librosa.filters import mel
 from scipy.interpolate import interp1d
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from soulxsinger.utils.audio_utils import resample_wav
 
 
 class BiGRU(nn.Module):
@@ -290,8 +287,6 @@ class RMVPE:
         return f0
 
     def infer_from_audio(self, audio, thred=0.03):
-        if not torch.is_tensor(audio):
-            audio = torch.from_numpy(audio)
 
         mel = self.mel_extractor(audio.float().to(self.device).unsqueeze(0), center=True)
         hidden = self.mel2hidden(mel)
@@ -326,138 +321,49 @@ class RMVPE:
         return devided
 
 class F0Extractor:
-    """Extract frame-level f0 from singing voice.
+    """Extract F0 on the SVC mel frame grid using RMVPE."""
 
-    Wrapper around an RMVPE network that:
-        1) loads the checkpoint once in ``__init__``
-        2) exposes a simple :py:meth:`process` API.
-    """
     def __init__(
         self,
         model_path: str,
         device: str = "cpu",
         *,
-        input_sr: int = 16000,
         target_sr: int = 24000,
         hop_size: int = 480,
-        max_duration: float = 300,
         thred: float = 0.03,
-        verbose: bool = True,
     ):
-        """Initialize the f0 extractor.
-
-        Args:
-            model_path: Path to RMVPE checkpoint.
-            device: Torch device string, e.g. ``"cuda:0"`` / ``"cpu"``.
-            input_sr: Input resample rate used by RMVPE frontend.
-            target_sr: Target sample rate for the output f0 grid.
-            hop_size: Target hop size for the output f0 grid.
-            max_duration: Max duration (seconds) for interpolation grid.
-            thred: Voicing threshold used when decoding salience.
-            verbose: Whether to print verbose logs.
-        """
-        self.input_sr = input_sr
         self.target_sr = target_sr
         self.hop_size = hop_size
-        self.max_duration = max_duration
         self.thred = thred
-
-        self.verbose = verbose
-
         self.model = RMVPE(model_path, device=device)
-
-        if self.verbose:
-            print(
-                "[f0 extraction] init success:",
-                f"device={device}",
-                f"model_path={model_path}",
-                f"input_sr={input_sr}",
-                f"target_sr={target_sr}",
-                f"hop_size={hop_size}",
-                f"thred={thred}",
-            )
 
     @staticmethod
     def interpolate_f0(
         f0_16k: np.ndarray,
-        original_length: int,
-        original_sr: int,
-        *,
-        target_sr: int = 48000,
-        hop_size: int = 256,
-        max_duration: float = 20.0,
+        target_frames: int,
+        target_sr: int = 24000,
+        hop_size: int = 480,
     ) -> np.ndarray:
-        """Interpolate f0 from RMVPE's 16k hop grid to target mel hop grid."""
-        mel_target_sr = target_sr
-        mel_hop_size = hop_size
-        mel_max_duration = max_duration
-
-        batch_max_length = int(mel_max_duration * mel_target_sr / mel_hop_size)
-        duration_in_seconds = original_length / original_sr
-        effective_target_length = int(duration_in_seconds * mel_target_sr)
-        original_frames = math.ceil(effective_target_length / mel_hop_size)
-        target_frames = min(original_frames, batch_max_length)
-
-        rmvpe_hop = 160
-        t_16k = np.arange(len(f0_16k)) * (rmvpe_hop / 16000.0)
-        t_target = np.arange(target_frames) * (mel_hop_size / float(mel_target_sr))
-
-        if len(f0_16k) > 0:
-            f_interp = interp1d(
-                t_16k,
-                f0_16k,
-                kind="linear",
-                bounds_error=False,
-                fill_value=0.0,
-                assume_sorted=True,
-            )
-            f0 = f_interp(t_target)
-        else:
-            f0 = np.zeros(target_frames)
-
-        if len(f0) != target_frames:
-            f0 = (
-                f0[:target_frames]
-                if len(f0) > target_frames
-                else np.pad(f0, (0, target_frames - len(f0)), "constant")
-            )
-
-        return f0
-
-    def process(self, audio_path: str, *, verbose: Optional[bool] = None) -> np.ndarray:
-        """Run f0 extraction for a single wav.
-
-        Args:
-            audio_path: Path to the input wav file.
-            verbose: Override instance-level verbose flag for this call.
-
-        Returns:
-            np.ndarray: shape ``[T]``, f0 in Hz (0 for unvoiced).
-        """
-        verbose = self.verbose if verbose is None else verbose
-        if verbose:
-            print(f"[f0 extraction] process: start: {audio_path}")
-            t0 = time.time()
-
-        audio, _ = librosa.load(audio_path, sr=self.input_sr)
-        f0_16k = self.model.infer_from_audio(audio, thred=self.thred)
-        f0 = self.interpolate_f0(
+        t_16k = np.arange(len(f0_16k)) * (160 / 16000.0)
+        t_target = np.arange(target_frames) * (hop_size / float(target_sr))
+        f_interp = interp1d(
+            t_16k,
             f0_16k,
-            original_length=audio.shape[-1],
-            original_sr=self.input_sr,
-            target_sr=self.target_sr,
-            hop_size=self.hop_size,
-            max_duration=self.max_duration,
+            kind="linear",
+            bounds_error=False,
+            fill_value=0.0,
+            assume_sorted=True,
         )
+        return f_interp(t_target)
 
-        if verbose:
-            dt = time.time() - t0
-            voiced_ratio = float(np.mean(f0 > 0)) if len(f0) else 0.0
-            print(
-                "[f0 extraction] process: done:",
-                f"frames={len(f0)}",
-                f"voiced_ratio={voiced_ratio:.3f}",
-                f"time={dt:.3f}s",
-            )
-
-        return f0
+    def process(
+        self,
+        waveform: torch.Tensor,
+        sample_rate: int,
+        target_frames: int,
+    ) -> np.ndarray:
+        audio = resample_wav(waveform, sample_rate, 16000).squeeze(0)
+        f0_16k = self.model.infer_from_audio(audio, thred=self.thred)
+        return self.interpolate_f0(
+            f0_16k, target_frames, self.target_sr, self.hop_size
+        )

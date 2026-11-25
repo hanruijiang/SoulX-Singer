@@ -50,7 +50,7 @@ def process(args, config, model=None):
     import numpy as np
     import soundfile as sf
     import torch
-    from soulxsinger.utils.audio_utils import load_wav
+    from soulxsinger.utils.audio_utils import load_wav, resample_wav
 
     validate_config(config)
     n_steps = args.n_steps if args.n_steps is not None else config.infer.n_steps
@@ -62,8 +62,10 @@ def process(args, config, model=None):
 
     sample_rate = config.audio.sample_rate
     hop_size = config.audio.hop_size
-    pt_wav = load_wav(args.prompt_wav_path, sample_rate)
-    gt_wav = load_wav(args.target_wav_path, sample_rate)
+    pt_audio, pt_sr = load_wav(args.prompt_wav_path)
+    gt_audio, gt_sr = load_wav(args.target_wav_path)
+    pt_wav = resample_wav(pt_audio, pt_sr, sample_rate)
+    gt_wav = resample_wav(gt_audio, gt_sr, sample_rate)
     if pt_wav.shape[-1] < sample_rate // 10 or gt_wav.shape[-1] < sample_rate // 10:
         raise ValueError("Both audio inputs must be at least 0.1 seconds long.")
     if pt_wav.shape[-1] > 30 * sample_rate:
@@ -81,15 +83,17 @@ def process(args, config, model=None):
         extractor = F0Extractor(
             str(args.rmvpe_path), device=args.device,
             target_sr=sample_rate, hop_size=hop_size,
-            max_duration=max(pt_wav.shape[-1], gt_wav.shape[-1]) / sample_rate + 1,
         )
 
-    def get_f0(path, audio_path, waveform):
-        f0 = np.load(path, allow_pickle=False) if path else extractor.process(audio_path)
+    def get_f0(path, audio_path, audio, sr, waveform):
+        frames = math.ceil(waveform.shape[-1] / hop_size)
+        f0 = (
+            np.load(path, allow_pickle=False)
+            if path else extractor.process(audio, sr, frames)
+        )
         f0 = np.asarray(f0, dtype=np.float32).squeeze()
         if f0.ndim != 1 or not f0.size or not np.isfinite(f0).all() or (f0 < 0).any():
             raise ValueError(f"Expected a finite nonnegative F0 vector: {path or audio_path}")
-        frames = math.ceil(waveform.shape[-1] / hop_size)
         if abs(len(f0) - frames) > 2:
             raise ValueError(
                 f"F0 length {len(f0)} does not match {frames} audio frames: {path or audio_path}"
@@ -99,9 +103,9 @@ def process(args, config, model=None):
             raise ValueError(f"No voiced F0 frames: {path or audio_path}")
         return torch.from_numpy(f0).unsqueeze(0).to(args.device)
 
-    pt_f0 = get_f0(args.prompt_f0_path, args.prompt_wav_path, pt_wav)
-    gt_f0 = get_f0(args.target_f0_path, args.target_wav_path, gt_wav)
-    del extractor
+    pt_f0 = get_f0(args.prompt_f0_path, args.prompt_wav_path, pt_audio, pt_sr, pt_wav)
+    gt_f0 = get_f0(args.target_f0_path, args.target_wav_path, gt_audio, gt_sr, gt_wav)
+    del extractor, pt_audio, gt_audio
     use_fp16 = args.fp16
     if model is None:
         model = build_model(args.model_path, config, args.device, use_fp16)

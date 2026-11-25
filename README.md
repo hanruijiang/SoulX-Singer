@@ -1,10 +1,10 @@
 # SoulX-Singer-SVC
 
-CLI-only singing voice conversion (SVC) based on [SoulX-Singer](https://github.com/Soul-AILab/SoulX-Singer). Convert source singing to a reference singer's timbre while preserving lyrics, melody and rhythm. This repository retains only SVC inference and optional pitch extraction. It does not include a web interface or a full preprocessing pipeline.
+Command-line singing voice conversion (SVC). Convert source vocals to a reference singer's timbre while preserving lyrics, melody and rhythm. F0 can be supplied as NumPy arrays or extracted automatically with RMVPE.
 
 ## Installation
 
-Python 3.10 is recommended. Install PyTorch/Torchaudio for your platform and CUDA version as appropriate; the requirements retain the original repository's Torch/Transformers version pair.
+Use Python 3.10 and a PyTorch/Torchaudio build suitable for your platform and CUDA version.
 
 ```bash
 git clone -b refactor/svc-cli-only --single-branch https://github.com/hanruijiang/SoulX-Singer.git
@@ -14,27 +14,27 @@ conda activate soulxsinger-svc
 pip install -r requirements.txt
 ```
 
-## Download weights
+## Model weights
 
-Download only the SVC checkpoint (about 2.8 GB):
+Download the SVC checkpoint:
 
 ```bash
 hf download Soul-AILab/SoulX-Singer model-svc.pt --local-dir pretrained_models/SoulX-Singer
 ```
 
-Whisper Base is downloaded automatically from `openai/whisper-base` on first model initialization. For automatic F0 extraction, also download the RMVPE checkpoint (about 181 MB):
+For automatic F0 extraction, download RMVPE:
 
 ```bash
 hf download Soul-AILab/SoulX-Singer-Preprocess rmvpe/rmvpe.pt --local-dir pretrained_models
 ```
 
-No RMVPE weights are needed if both F0 arrays are supplied. Only load trusted checkpoints (the loaders explicitly use `weights_only=False`). For offline inference, cache Whisper and download the required weights beforehand.
+Whisper Base is downloaded from `openai/whisper-base` on first model initialization. For offline use, cache it in advance. Use trusted model checkpoints.
 
-## CLI inference
+## Inference
 
-Run from the repository root. The prompt is a reference clip of the desired singer (0.1–30 seconds). The target is the source singing to convert; use isolated vocals without accompaniment. Input audio is converted to mono and resampled to 24 kHz. Long targets are segmented by the SVC model into windows of at most 30 seconds. Automatic RMVPE extraction still processes the complete input before SVC segmentation; for very long audio with limited memory, supply precomputed F0.
+Run commands from the repository root. Use isolated vocals without accompaniment. The reference clip must be 0.1–30 seconds; the source clip must be at least 0.1 seconds. Audio is converted to mono and resampled to 24 kHz for SVC and 16 kHz for RMVPE. Long sources are converted in segments of at most 30 seconds; RMVPE extracts F0 from the complete input.
 
-### Convert your own audio (automatic F0 extraction)
+### Automatic F0
 
 ```bash
 python -m cli.inference_svc \
@@ -44,27 +44,29 @@ python -m cli.inference_svc \
   --device cuda --auto_shift
 ```
 
-### Use precomputed F0
+### Precomputed F0
 
 ```bash
 bash example/infer_svc.sh
 ```
 
-The example uses the bundled audio and F0 arrays and does not require RMVPE. You can pass your own arrays with `--prompt_f0_path` and `--target_f0_path`. Each should be a 1-D NumPy array of F0 in Hz, sampled at 50 frames/s (20 ms hop), with unvoiced frames set to zero, aligned to the corresponding input audio. If one array is omitted, RMVPE extracts only that input.
+The example uses bundled audio and F0 arrays. Pass your own arrays with `--prompt_f0_path` and `--target_f0_path`. Each array contains F0 in Hz at 50 frames/s (20 ms hop), aligned to its audio, with unvoiced frames set to zero. RMVPE is used only for missing arrays.
 
-The result is written to `<save_dir>/generated.wav` at 24 kHz.
+The result is saved as `<save_dir>/generated.wav` at 24 kHz.
 
 | Option | Description |
 | --- | --- |
-| `--model_path` | SVC checkpoint path |
+| `--model_path` | SVC checkpoint |
 | `--config` | Model YAML (default: `soulxsinger/config/soulxsinger.yaml`) |
-| `--rmvpe_path` | Optional pitch extractor checkpoint |
-| `--device` | CUDA device (e.g. cuda:0) or cpu (slower) |
+| `--rmvpe_path` | RMVPE checkpoint |
+| `--device` | CUDA device (e.g. cuda:0) or cpu |
 | `--auto_shift` | Match median pitch to the reference singer |
 | `--pitch_shift` | Manual shift in semitones; nonzero overrides automatic shift |
 | `--n_steps` | Flow matching steps (default 32) |
 | `--cfg` | Classifier-free guidance scale (default 3) |
-| `--fp16` | Mixed precision on CUDA; audio/F0, mel analysis, ISTFT and output waveform remain float32 |
+| `--fp16` | Mixed precision on CUDA |
+
+The audio and model settings in the YAML are fixed by the checkpoint. Customize `infer.n_steps` and `infer.cfg` or override them on the command line.
 
 ```bash
 python -m cli.inference_svc --help
@@ -72,6 +74,6 @@ python -m cli.inference_svc --help
 
 ## Attribution and license
 
-Original model and inference implementation: [Soul-AILab/SoulX-Singer](https://github.com/Soul-AILab/SoulX-Singer). See the [paper](https://arxiv.org/abs/2602.07803), [model weights](https://huggingface.co/Soul-AILab/SoulX-Singer) and [reference Space](https://huggingface.co/spaces/Soul-AILab/SoulX-Singer). Acknowledgements: [Amphion](https://github.com/open-mmlab/Amphion), [RMVPE](https://github.com/Dream-High/RMVPE), and [Whisper](https://github.com/openai/whisper).
+Based on [Soul-AILab/SoulX-Singer](https://github.com/Soul-AILab/SoulX-Singer) ([paper](https://arxiv.org/abs/2602.07803), [model weights](https://huggingface.co/Soul-AILab/SoulX-Singer)). Acknowledgements: [Amphion](https://github.com/open-mmlab/Amphion), [RMVPE](https://github.com/Dream-High/RMVPE), and [Whisper](https://github.com/openai/whisper).
 
-The original [Apache 2.0 license](LICENSE) and source attribution are retained. Use voices with permission; do not create deceptive impersonations.
+Licensed under [Apache 2.0](LICENSE).
